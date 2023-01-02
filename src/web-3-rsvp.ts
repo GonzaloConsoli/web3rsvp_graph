@@ -1,71 +1,125 @@
+import { Address, ipfs, json } from "@graphprotocol/graph-ts";
 import {
-  ConfirmedAttendee as ConfirmedAttendeeEvent,
-  DepositsPaidOut as DepositsPaidOutEvent,
-  NewEventCreated as NewEventCreatedEvent,
-  NewRSVP as NewRSVPEvent
-} from "../generated/Web3RSVP/Web3RSVP"
-import {
-  ConfirmedAttendee,
-  DepositsPaidOut,
-  NewEventCreated,
-  NewRSVP
-} from "../generated/schema"
+	ConfirmedAttendee,
+	NewEventCreated,
+	NewRSVP,
+	DepositsPaidOut,
+} from "../generated/Web3RSVP/Web3RSVP";
+import { Account, RSVP, Confirmation, Event } from "../generated/schema";
+import { integer } from "@protofire/subgraph-toolkit";
 
-export function handleConfirmedAttendee(event: ConfirmedAttendeeEvent): void {
-  let entity = new ConfirmedAttendee(
-    event.transaction.hash.concatI32(event.logIndex.toI32())
-  )
-  entity.eventID = event.params.eventID
-  entity.attendeeAddress = event.params.attendeeAddress
+export function handleNewEventCreated(event: NewEventCreated): void {
+	// try to load event, if doesn't exists create it
+	let newEvent = Event.load(event.params.eventID.toHex());
 
-  entity.blockNumber = event.block.number
-  entity.blockTimestamp = event.block.timestamp
-  entity.transactionHash = event.transaction.hash
+	if (newEvent != null) return
 
-  entity.save()
+	newEvent = new Event(event.params.eventID.toHex());
+	newEvent.eventID = event.params.eventID;
+	newEvent.eventOwner = event.params.creatorAddress;
+	newEvent.eventTimestamp = event.params.eventTimestamp;
+	newEvent.maxCapacity = event.params.maxCapacity;
+	newEvent.deposit = event.params.deposit;
+	newEvent.paidOut = false;
+	newEvent.totalRSVPs = integer.ZERO;
+	newEvent.totalConfirmedAttendees = integer.ZERO;
+
+	let metadata = ipfs.cat(event.params.eventDataCID + "/data.json");
+
+	if (metadata) {
+		const value = json.fromBytes(metadata).toObject();
+		if (value) {
+			const name = value.get("name");
+			const description = value.get("description");
+			const link = value.get("link");
+			const imagePath = value.get("image");
+
+			if (name) {
+				newEvent.name = name.toString();
+			}
+
+			if (description) {
+				newEvent.description = description.toString();
+			}
+
+			if (link) {
+				newEvent.link = link.toString();
+			}
+
+			if (imagePath) {
+				const imageURL =
+					"https://ipfs.io/ipfs/" +
+					event.params.eventDataCID +
+					imagePath.toString();
+				newEvent.imageURL = imageURL;
+			} else {
+				// return fallback image if no imagePath
+				const fallbackURL =
+					"https://ipfs.io/ipfs/bafybeibssbrlptcefbqfh4vpw2wlmqfj2kgxt3nil4yujxbmdznau3t5wi/event.png";
+				newEvent.imageURL = fallbackURL;
+			}
+		}
+	}
+
+	newEvent.save();
 }
 
-export function handleDepositsPaidOut(event: DepositsPaidOutEvent): void {
-  let entity = new DepositsPaidOut(
-    event.transaction.hash.concatI32(event.logIndex.toI32())
-  )
-  entity.eventID = event.params.eventID
+function getOrCreateAccount(address: Address): Account {
+	let account = Account.load(address.toHex());
+	if (account != null) return account;
 
-  entity.blockNumber = event.block.number
-  entity.blockTimestamp = event.block.timestamp
-  entity.transactionHash = event.transaction.hash
+	account = new Account(address.toHex());
+	account.totalRSVPs = integer.ZERO;
+	account.totalAttendedEvents = integer.ZERO;
+	account.save();
+	return account;
 
-  entity.save()
 }
 
-export function handleNewEventCreated(event: NewEventCreatedEvent): void {
-  let entity = new NewEventCreated(
-    event.transaction.hash.concatI32(event.logIndex.toI32())
-  )
-  entity.eventID = event.params.eventID
-  entity.creatorAddress = event.params.creatorAddress
-  entity.eventTimestamp = event.params.eventTimestamp
-  entity.maxCapacity = event.params.maxCapacity
-  entity.deposit = event.params.deposit
-  entity.eventDataCID = event.params.eventDataCID
-
-  entity.blockNumber = event.block.number
-  entity.blockTimestamp = event.block.timestamp
-  entity.transactionHash = event.transaction.hash
-
-  entity.save()
+export function handleNewRSVP(event: NewRSVP): void {
+	let id = event.params.eventID.toHex() + event.params.attendeeAddress.toHex();
+	let newRSVP = RSVP.load(id);
+	let account = getOrCreateAccount(event.params.attendeeAddress);
+	let thisEvent = Event.load(event.params.eventID.toHex());
+	if (newRSVP == null && thisEvent != null) {
+		newRSVP = new RSVP(id);
+		newRSVP.attendee = account.id;
+		newRSVP.event = thisEvent.id;
+		newRSVP.save();
+		thisEvent.totalRSVPs = integer.increment(thisEvent.totalRSVPs);
+		thisEvent.save();
+		account.totalRSVPs = integer.increment(account.totalRSVPs);
+		account.save();
+	}
 }
 
-export function handleNewRSVP(event: NewRSVPEvent): void {
-  let entity = new NewRSVP(
-    event.transaction.hash.concatI32(event.logIndex.toI32())
-  )
-  entity.eventID = event.params.eventID
-  entity.attendeeAddress = event.params.attendeeAddress
+export function handleConfirmedAttendee(event: ConfirmedAttendee): void {
+	let id = event.params.eventID.toHex() + event.params.attendeeAddress.toHex();
+	let newConfirmation = Confirmation.load(id);
+	let account = getOrCreateAccount(event.params.attendeeAddress);
+	let thisEvent = Event.load(event.params.eventID.toHex());
+	if (newConfirmation == null && thisEvent != null) {
+		newConfirmation = new Confirmation(id);
+		newConfirmation.attendee = account.id;
+		newConfirmation.event = thisEvent.id;
+		newConfirmation.save();
 
-  entity.blockNumber = event.block.number
-  entity.blockTimestamp = event.block.timestamp
-  entity.transactionHash = event.transaction.hash
+		thisEvent.totalConfirmedAttendees = integer.increment(
+			thisEvent.totalConfirmedAttendees
+		);
+		thisEvent.save();
 
-  entity.save()
+		account.totalAttendedEvents = integer.increment(
+			account.totalAttendedEvents
+		);
+		account.save();
+	}
+}
+
+export function handleDepositsPaidOut(event: DepositsPaidOut): void {
+	let thisEvent = Event.load(event.params.eventID.toHex());
+	if (thisEvent) {
+		thisEvent.paidOut = true;
+		thisEvent.save();
+	}
 }
